@@ -3282,56 +3282,85 @@ namespace GrzMotion
             if ( _uvcDeviceSnap_NewFrameIsBusy ) {
                 return;
             }
-            _uvcDeviceSnap_NewFrameIsBusy = true;
-            // create exclusive snapshot device
-            VideoCaptureDevice uvcDeviceSnap = new VideoCaptureDevice(Settings.CameraMoniker);
-            int uvcDeviceSnap_NewFramePass = 0;
-            // get best UVC snapshot resolution
-            int maxW = 0;
-            int maxH = 0;
-            int index = -1;
-            for ( int i = 0; i < uvcDeviceSnap.VideoCapabilities.Length; i++ ) {
-                if ( uvcDeviceSnap.VideoCapabilities[i].FrameSize.Width >= maxW && uvcDeviceSnap.VideoCapabilities[i].FrameSize.Height >= maxH ) {
-                    maxW = uvcDeviceSnap.VideoCapabilities[i].FrameSize.Width;
-                    maxH = uvcDeviceSnap.VideoCapabilities[i].FrameSize.Height;
-                    index = i;
-                }
-            }
-            if ( index != -1 ) {
-                // init and start UVC snapshot device
-                uvcDeviceSnap.VideoResolution = uvcDeviceSnap.VideoCapabilities[index];
-                uvcDeviceSnap.Start();
-                // inline event handling
-                uvcDeviceSnap.NewFrame += new AForge.Video.NewFrameEventHandler(delegate (object sender, AForge.Video.NewFrameEventArgs eventArgs) {
-                    // let pass first 10 frames due to presumable over exposure
-                    if ( uvcDeviceSnap_NewFramePass++ < 10 ) {
-                        return;
-                    }
-                    // reset pass thru counter
-                    uvcDeviceSnap_NewFramePass = 0;
-                    // save UVC snapshot bmp
-                    Bitmap bmp = (Bitmap)eventArgs.Frame.Clone();
-                    using ( var graphics = Graphics.FromImage(bmp) ) {
-                        string text = DateTime.Now.ToString("yyyy.MM.dd HH:mm:ss_fff", System.Globalization.CultureInfo.InvariantCulture);
-                        graphics.DrawString(text, _timestampFont, Brushes.Black, 5, 5);
-                    }
-                    string path = System.IO.Path.Combine(Settings.StoragePath, _nowStringPath + "_snap");
-                    System.IO.Directory.CreateDirectory(path);
-                    string fileName = System.IO.Path.Combine(path, _nowStringFile + ".jpg");
-                    bmp.Save(fileName, System.Drawing.Imaging.ImageFormat.Jpeg);
-                    bmp.Dispose();
-                    // stop UVC snapshot device
-                    uvcDeviceSnap.SignalToStop();
-                    System.Diagnostics.Stopwatch sw = new System.Diagnostics.Stopwatch();
-                    sw.Start();
-                    do {
-                        Application.DoEvents();
-                        System.Threading.Thread.Sleep(100);
-                    } while ( sw.ElapsedMilliseconds < 500 );
-                    // reset busy state
-                    _uvcDeviceSnap_NewFrameIsBusy = false;
-                });
 
+            // locals
+            int index = -1;
+            int uvcDeviceSnap_NewFramePass = 0;
+            VideoCaptureDevice uvcDeviceSnap;
+            
+            try {
+                // busy flag
+                _uvcDeviceSnap_NewFrameIsBusy = true;
+                // create exclusive snapshot device
+                uvcDeviceSnap = new VideoCaptureDevice(Settings.CameraMoniker);
+                if ( uvcDeviceSnap == null ) {
+                    _uvcDeviceSnap_NewFrameIsBusy = false;
+                    return;
+                }
+                // get best UVC snapshot resolution
+                int maxW = 0;
+                int maxH = 0;
+                for ( int i = 0; i < uvcDeviceSnap.VideoCapabilities.Length; i++ ) {
+                    if ( uvcDeviceSnap.VideoCapabilities[i].FrameSize.Width >= maxW && uvcDeviceSnap.VideoCapabilities[i].FrameSize.Height >= maxH ) {
+                        maxW = uvcDeviceSnap.VideoCapabilities[i].FrameSize.Width;
+                        maxH = uvcDeviceSnap.VideoCapabilities[i].FrameSize.Height;
+                        index = i;
+                    }
+                }
+            } catch (Exception e) {
+                _uvcDeviceSnap_NewFrameIsBusy = false;
+                return;
+            }
+
+            if ( index != -1 ) {
+                try {
+                    // init and start UVC snapshot device
+                    uvcDeviceSnap.VideoResolution = uvcDeviceSnap.VideoCapabilities[index];
+                    uvcDeviceSnap.Start();
+                    // inline event handling
+                    uvcDeviceSnap.NewFrame += new AForge.Video.NewFrameEventHandler(delegate (object sender, AForge.Video.NewFrameEventArgs eventArgs) {
+                        try {
+                            // let pass first 10 frames due to presumable over exposure
+                            if ( uvcDeviceSnap_NewFramePass++ < 10 ) {
+                                return;
+                            }
+                            // reset pass thru counter
+                            uvcDeviceSnap_NewFramePass = 0;
+                            // save UVC snapshot bmp
+                            try {
+                                Bitmap bmp = (Bitmap)eventArgs.Frame.Clone();
+                                using ( var graphics = Graphics.FromImage(bmp) ) {
+                                    string text = DateTime.Now.ToString("yyyy.MM.dd HH:mm:ss_fff", System.Globalization.CultureInfo.InvariantCulture);
+                                    graphics.DrawString(text, _timestampFont, Brushes.Black, 5, 5);
+                                }
+                                string path = System.IO.Path.Combine(Settings.StoragePath, _nowStringPath + "_snap");
+                                System.IO.Directory.CreateDirectory(path);
+                                string fileName = System.IO.Path.Combine(path, _nowStringFile + ".jpg");
+                                bmp.Save(fileName, System.Drawing.Imaging.ImageFormat.Jpeg);
+                                bmp.Dispose();
+                            } catch ( Exception e ) {
+                                Logger.logTextLn(DateTime.Now, "uvcDeviceSnap.NewFrame bmp exception: " + e.Message);
+                            }
+                            // stop UVC snapshot device
+                            uvcDeviceSnap.SignalToStop();
+                            System.Diagnostics.Stopwatch sw = new System.Diagnostics.Stopwatch();
+                            sw.Start();
+                            do {
+                                Application.DoEvents();
+                                System.Threading.Thread.Sleep(100);
+                            } while ( sw.ElapsedMilliseconds < 500 );
+                            // reset busy state
+                            _uvcDeviceSnap_NewFrameIsBusy = false;
+                        } catch ( Exception e ) {
+                            Logger.logTextLn(DateTime.Now, "uvcDeviceSnap.NewFrame exception: " + e.Message);
+                        } finally {
+                            _uvcDeviceSnap_NewFrameIsBusy = false;
+                        }
+                    });
+                } catch (Exception e) {
+                    Logger.logTextLn(DateTime.Now, "MakeSnapshotWithUVC start exception: " + e.Message);
+                    _uvcDeviceSnap_NewFrameIsBusy = false;
+                }
             } else {
                 _uvcDeviceSnap_NewFrameIsBusy = false;
                 uvcDeviceSnap = null;
