@@ -3287,7 +3287,7 @@ namespace GrzMotion
             int index = -1;
             int uvcDeviceSnap_NewFramePass = 0;
             VideoCaptureDevice uvcDeviceSnap;
-            
+
             try {
                 // busy flag
                 _uvcDeviceSnap_NewFrameIsBusy = true;
@@ -3307,7 +3307,7 @@ namespace GrzMotion
                         index = i;
                     }
                 }
-            } catch (Exception e) {
+            } catch ( Exception e ) {
                 _uvcDeviceSnap_NewFrameIsBusy = false;
                 return;
             }
@@ -3357,7 +3357,7 @@ namespace GrzMotion
                             _uvcDeviceSnap_NewFrameIsBusy = false;
                         }
                     });
-                } catch (Exception e) {
+                } catch ( Exception e ) {
                     Logger.logTextLn(DateTime.Now, "MakeSnapshotWithUVC start exception: " + e.Message);
                     _uvcDeviceSnap_NewFrameIsBusy = false;
                 }
