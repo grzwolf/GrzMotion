@@ -56,6 +56,7 @@ namespace GrzMotion
         private int _uvcDeviceRestartCounter = 0;                            // video device restart counter per app session
         
         private RtspControl _rtspStream;                                     // RTSP stream infra 
+        private int _rtspDeviceExceptionCounter = 0;                         // device Exception counter
 
         private VideoCaptureDevice _uvcDeviceSnap = null;                    // AForge UVC camera device for snapshots
         bool _uvcDeviceSnap_NewFrameIsBusy = false;                          // avoid snapshot single shot overrun
@@ -771,6 +772,31 @@ namespace GrzMotion
 
             // actions around 00:30 --> timer tick is 30s, so within a range of 60s this condition will be met once for sure (surely 2x)
             if ( DateTime.Now.TimeOfDay >= MainForm.BootTimeBeg && DateTime.Now.TimeOfDay <= MainForm.BootTimeEnd ) {
+                // reset RTSP exception restart app counter and RTSP device restart counter
+                if ( Settings.RtspRestartAppCount > 0 ) {
+                    Settings.RtspRestartAppCount = 0;
+                    _rtspDeviceExceptionCounter = 0;
+                    AppSettings.IniFile ini = new AppSettings.IniFile(System.Windows.Forms.Application.ExecutablePath + ".ini");
+                    ini.IniWriteValue("GrzMotion", "RtspRestartAppCount", "0");
+                    // if not yet running, start RTSP via app restart
+                    if ( Settings.ImageSource == ImageSourceType.UVC ) {
+                        if ( _rtspStream == null || (_rtspStream != null && _rtspStream.GetStatus != RtspControl.Status.RUNNING) ) {
+                            // set flag, that this is not an app crash
+                            ini.IniWriteValue("GrzMotion", "AppCrash", "False");
+                            // memorize count of app restarts, needed to avoid restart loops
+                            Settings.RtspRestartAppCount++;
+                            ini.IniWriteValue("GrzMotion", "RtspRestartAppCount", Settings.RtspRestartAppCount.ToString());
+                            Logger.logTextLnU(DateTime.Now, String.Format("new day RTSP exception GrzMotion start"));
+                            string exeName = System.Diagnostics.Process.GetCurrentProcess().MainModule.FileName;
+                            ProcessStartInfo startInfo = new ProcessStartInfo(exeName);
+                            try {
+                                System.Diagnostics.Process.Start(startInfo);
+                                this.Close();
+                            } catch ( Exception ) {; }
+                            return;
+                        }
+                    }
+                }
                 // reset Telegram restart counter for the app current session
                 _telegramRestartCounter = 0;
                 // reset 'Telegram malfunction forced app restart' counter
@@ -1491,7 +1517,7 @@ namespace GrzMotion
             _runPing = false;
 
             // stop RTSP stream
-            if ( (_rtspStream != null) && _rtspStream.IsRunning ) {
+            if ( (_rtspStream != null) && _rtspStream.GetStatus == RtspControl.Status.RUNNING ) {
                 _rtspStream.Error -= rtspStream_Error;
                 _rtspStream.NewFrame -= rtspStream_NewFrame;
                 _rtspStream.StopRTSP();
@@ -2068,7 +2094,34 @@ namespace GrzMotion
         // RTSP internal error
         void rtspStream_Error() {
             if ( _rtspStream != null && this.connectButton.Text != _buttonConnectString ) {
-                // RTSP stream was started and has now an error
+                // exception ?
+                if ( _rtspStream.GetStatus == RtspControl.Status.EXCEPTION ) {
+                    _rtspDeviceExceptionCounter++;
+                }
+                // RTSP stream was already started and now has an error
+                Logger.logTextLnU(DateTime.Now, String.Format("rtspStream_Error: {0} exc_cnt={1}", _rtspStream.GetStatus.ToString(), _rtspDeviceExceptionCounter));
+                // restart GrzMotion after too many exceptions
+                if ( _rtspDeviceExceptionCounter > 5 ) {
+                    if ( Settings.RtspRestartAppCount < 5 ) {
+                        // set flag, that this is not an app crash
+                        AppSettings.IniFile ini = new AppSettings.IniFile(System.Windows.Forms.Application.ExecutablePath + ".ini");
+                        ini.IniWriteValue("GrzMotion", "AppCrash", "False");
+                        // memorize count of app restarts, needed to avoid restart loops
+                        Settings.RtspRestartAppCount++;
+                        ini.IniWriteValue("GrzMotion", "RtspRestartAppCount", Settings.RtspRestartAppCount.ToString());
+                        Logger.logTextLnU(DateTime.Now, String.Format("RTSP exception count > 5, now restarting GrzMotion"));
+                        string exeName = System.Diagnostics.Process.GetCurrentProcess().MainModule.FileName;
+                        ProcessStartInfo startInfo = new ProcessStartInfo(exeName);
+                        try {
+                            System.Diagnostics.Process.Start(startInfo);
+                            this.Close();
+                        } catch ( Exception ) {; }
+                    } else {
+                        Logger.logTextLnU(DateTime.Now, String.Format("RTSP app restart count > 5, NOT restarting GrzMotion"));
+                    }
+                    return;
+                }
+                // try to restart RTSP  
                 this.connectButton.PerformClick();
                 // wait until connect button is ready to start again 
                 System.Diagnostics.Stopwatch sw = new System.Diagnostics.Stopwatch();
@@ -2079,9 +2132,10 @@ namespace GrzMotion
                 } while ( this.connectButton.Text != _buttonConnectString && sw.ElapsedMilliseconds < 5000 );
                 // restart RTSP stream
                 if ( this.connectButton.Text == _buttonConnectString ) {
+                    Logger.logTextLnU(DateTime.Now, "RTSP trying to restart");
                     this.connectButton.PerformClick();
                 } else {
-                    Logger.logTextLnU(DateTime.Now, "RTSP restart failed");
+                    Logger.logTextLnU(DateTime.Now, "RTSP restart not possible");
                 }
             }
         }
@@ -2092,7 +2146,11 @@ namespace GrzMotion
             BmpRingBuffer.bmp = (Bitmap)bmp.Clone();
             // start motion detection after the first received image 
             if ( _justConnected ) {
-                new Thread(() => rtspImageGrabber()).Start();
+                if ( _rtspStream.GetStatus == RtspControl.Status.RUNNING ) {
+                    // reset exception counter
+                    _rtspDeviceExceptionCounter = 0;
+                }
+                new Thread( () => rtspImageGrabber() ).Start();
                 _justConnected = false;
             }
         }
@@ -2123,7 +2181,7 @@ namespace GrzMotion
             // loop as long as camera is running
             //
             int excStep = -1;
-            while ( _rtspStream.IsRunning ) {
+            while ( _rtspStream.GetStatus == RtspControl.Status.RUNNING ) {
 
                 // calc fps
                 DateTime now = DateTime.Now;
@@ -2204,6 +2262,7 @@ namespace GrzMotion
                         _motionsDetected++;
                         // RTSP is usually wide angle, allow snapshot if there is a good UVC
                         if ( Settings.RtspSnapshot ) {
+                            excStep = 8;
                             Task.Run(() => {
                                 MakeSnapshotWithUVC();
                             });
@@ -2211,7 +2270,6 @@ namespace GrzMotion
                     }
 
                     // show current, scaled and processed image in pictureBox, if not minimized
-                    excStep = 8;
                     if ( WindowState != FormWindowState.Minimized ) {
                         excStep = 9;
                         PictureBox.Image = (Bitmap)_procFrame.Clone();
@@ -3238,7 +3296,7 @@ namespace GrzMotion
                 }
                 // open a still image
                 if ( m.WParam.ToInt32() == 1235 ) {
-                    if ( _uvcDevice != null && _uvcDevice.IsRunning || _rtspStream.IsRunning ) {
+                    if ( _uvcDevice != null && _uvcDevice.IsRunning || _rtspStream.GetStatus == RtspControl.Status.RUNNING ) {
                         MessageBox.Show("Stop the running camera prior to open a still image.", "Note");
                         return;
                     }
@@ -3734,6 +3792,10 @@ namespace GrzMotion
         [ReadOnly(false)]
         public bool RtspSnapshot { get; set; }
         [CategoryAttribute("Camera")]
+        [Description("Number of app restarts due to RTSP exceptions")]
+        [ReadOnly(true)]
+        public int RtspRestartAppCount { get; set; }
+        [CategoryAttribute("Camera")]
         [ReadOnly(true)]
         public string CameraMoniker { get; set; }
         [CategoryAttribute("Camera")]
@@ -4041,6 +4103,10 @@ namespace GrzMotion
             if ( int.TryParse(ini.IniReadValue(iniSection, "RtspResolutionHeight", "1000"), out tmpInt) ) {
                 RtspResolution = new Size(RtspResolution.Width, tmpInt);
             }
+            // RTSP app restart count
+            if ( int.TryParse(ini.IniReadValue(iniSection, "RtspRestartAppCount", "0"), out tmpInt) ) {
+                RtspRestartAppCount = tmpInt;
+            }
             // camera moniker string
             CameraMoniker = ini.IniReadValue(iniSection, "CameraMoniker", "empty");
             // camera resolution width
@@ -4286,6 +4352,8 @@ namespace GrzMotion
             ini.IniWriteValue(iniSection, "RtspResolutionWidth", RtspResolution.Width.ToString());
             // RTSP resolution height
             ini.IniWriteValue(iniSection, "RtspResolutionHeight", RtspResolution.Height.ToString());
+            // RTSP app restart count
+            ini.IniWriteValue(iniSection, "RtspRestartAppCount", RtspRestartAppCount.ToString());
             // camera moniker string
             ini.IniWriteValue(iniSection, "CameraMoniker", CameraMoniker);
             // camera resolution width

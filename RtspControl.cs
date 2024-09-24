@@ -21,9 +21,21 @@ namespace RtspInfra {
         private Size _sensorSize;
         private Rectangle _sensorRect;
 
-        public bool IsRunning { get; set;  }
-
         public RtspControl() {
+        }
+
+        // RtspControl status
+        public enum Status {
+            UNDEFINED = -1,
+            RUNNING = 0,
+            CANCELLED = 1,
+            EXCEPTION = 2,
+        }
+        private Status _status = Status.UNDEFINED;
+        public Status GetStatus { 
+            get {
+                return _status;
+            }
         }
 
         // error notification
@@ -31,6 +43,7 @@ namespace RtspInfra {
         public event ErrorHandler Error;
         // connect to a RTSP stream
         public async void StartRTSP(Size sensorSize, string url) {
+            _status = Status.UNDEFINED;
             // camera sensor data
             _sensorSize = sensorSize;
             _sensorRect = new Rectangle(0, 0, sensorSize.Width, sensorSize.Height);
@@ -44,19 +57,19 @@ namespace RtspInfra {
             TimeSpan delay = TimeSpan.FromSeconds(10);
             using ( var rtspClient = new RtspClient(connectionParameters) ) {
                 rtspClient.FrameReceived += RtspClient_FrameReceived;
-                IsRunning = true;
                 while ( true ) {
                     try {
+                        _status = Status.RUNNING;
                         await rtspClient.ConnectAsync(_cancellationTokenSource.Token);
                         await rtspClient.ReceiveAsync(_cancellationTokenSource.Token);
                     } catch ( OperationCanceledException ) {
-                        IsRunning = false;
                         Logger.logTextLn(DateTime.Now, "RtspControl cancelled");
+                        _status = Status.CANCELLED;
                         return;
                     } catch ( RtspClientException e ) {
-                        Error?.Invoke();
-                        IsRunning = false;
                         Logger.logTextLnU(DateTime.Now, "RtspControl exception: " + e.Message);
+                        _status = Status.EXCEPTION;
+                        Error?.Invoke();
                         return;
                     }
                 }
