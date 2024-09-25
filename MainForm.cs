@@ -58,7 +58,7 @@ namespace GrzMotion
         private RtspControl _rtspStream;                                     // RTSP stream infra 
         private int _rtspDeviceExceptionCounter = 0;                         // device Exception counter
 
-        private VideoCaptureDevice _uvcDeviceSnap = null;                    // AForge UVC camera device for snapshots
+        private VideoCaptureDevice _uvcDeviceSnap = null;                    // AForge UVC camera device for snapshots, only if in RTSP mode
         bool _uvcDeviceSnap_NewFrameIsBusy = false;                          // avoid snapshot single shot overrun
 
         private string _buttonConnectString;                                 // original text on camera start button
@@ -103,7 +103,7 @@ namespace GrzMotion
                 this.bitmapLocked = false;
             }
         }
-        List<Motion> _motionsList = new List<Motion>();                      // list of Motion, which are motion sequences if 'consecutive' is true
+        List<Motion> _motionsList = new List<Motion>();                      // list of Motion, which are motion sequences, if 'consecutive' is true
 
         static int _motionsDetected = 0;                                     // all motions detection counter
         static int _consecutivesDetected = 0;                                // consecutive motions counter
@@ -235,7 +235,7 @@ namespace GrzMotion
                 Logger.logTextLn(DateTime.Now, "App start regular");
             }
 
-            // before processing, images will be scaled down to a real image size
+            // before processing, images will be scaled down to a smaller image size
             Settings.ScaledImageSize = new Size(800, 600);                               
 
             // IMessageFilter - an encapsulated message filter
@@ -2234,7 +2234,7 @@ namespace GrzMotion
                         graphics.DrawString(text, _timestampFont, Brushes.Black, xPos, yDraw);
                     }
 
-                    // motion detector works with a scaled image, typically 800 x 600
+                    // motion detector works with a scaled image, typically 800 x 600 or whatever fits to width 800 regarding image's aspect ratio
                     excStep = 3;
                     if ( _currFrame != null ) {
                         _currFrame.Dispose();
@@ -3768,7 +3768,7 @@ namespace GrzMotion
             HIRES = 2,
         }
 
-        // webserver image type
+        // image source type
         public enum ImageSourceType {
             UVC = 0,
             RTSP = 1,
