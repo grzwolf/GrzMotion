@@ -56,7 +56,10 @@ namespace GrzMotion
         private int _uvcDeviceRestartCounter = 0;                            // video device restart counter per app session
         
         private RtspControl _rtspStream;                                     // RTSP stream infra 
+        private Thread _rtspStreamThread = null;                             // a separate thread as a measure of last resort to abort a hanging RTSP client 
         private int _rtspDeviceExceptionCounter = 0;                         // device Exception counter
+
+        private DateTime _appStartTime = DateTime.Now;                       // app start time is used to reset Settings.RtspRestartAppCount
 
         private VideoCaptureDevice _uvcDeviceSnap = null;                    // AForge UVC camera device for snapshots, only if in RTSP mode
         bool _uvcDeviceSnap_NewFrameIsBusy = false;                          // avoid snapshot single shot overrun
@@ -72,6 +75,8 @@ namespace GrzMotion
         string _nowStringFile = "";
         string _nowStringPath = "";
         Font   _timestampFont = new Font("Arial", 20, FontStyle.Bold, GraphicsUnit.Pixel);
+
+        PerformanceCounter ramCounter = new PerformanceCounter("Memory", "Available MBytes");
 
         public class Motion {                                                // helper to have a motion list other than the stored files on disk
             public String fileNameMotion;
@@ -442,6 +447,11 @@ namespace GrzMotion
             }
         }
 
+        // monitor RAM usage
+        public string getAvailableRAM() {
+            return ramCounter.NextValue() + " MB";
+        }
+
         // get OS boot time
         [DllImport("Kernel32.dll")]
         static extern long GetTickCount64();
@@ -482,6 +492,11 @@ namespace GrzMotion
 
         // a general timer 1x / 30s for app flow control
         private void timerFlowControl_Tick(object sender, EventArgs e) {
+
+            // monitor RAM usage
+            if ( Settings.LogRamUsage ) {
+                Logger.logTextLn(DateTime.Now, String.Format("RAM usage: {0}", getAvailableRAM()));
+            }
 
             // check once per 30s, whether to search & send an alarm video sequence; ideally it's just the rest after an already sent sequence of 6 motions started from detectMotion(..)
             if ( _alarmSequence && !_alarmSequenceBusy ) {
@@ -597,6 +612,17 @@ namespace GrzMotion
 
             // one check every 15 minutes
             if ( DateTime.Now.Minute % 15 == 0 && DateTime.Now.Second < 31 ) {
+
+                // reset RTSP app restart counter; it is used to prevent restart loops
+                if ( Settings.RtspRestartAppCount > 0 ) {
+                    if ( (DateTime.Now - _appStartTime).TotalHours > 1 ) {
+                        Settings.RtspRestartAppCount = 0;
+                        _rtspDeviceExceptionCounter = 0;
+                        AppSettings.IniFile ini = new AppSettings.IniFile(System.Windows.Forms.Application.ExecutablePath + ".ini");
+                        ini.IniWriteValue("GrzMotion", "RtspRestartAppCount", "0");
+                        Logger.logTextLnU(DateTime.Now, "timerFlowControl_Tick: reset RTSP app restart counter to 0");
+                    }
+                }
 
                 // log cleanup
                 if ( Settings.DebugMotions ) {
@@ -779,20 +805,17 @@ namespace GrzMotion
                     AppSettings.IniFile ini = new AppSettings.IniFile(System.Windows.Forms.Application.ExecutablePath + ".ini");
                     ini.IniWriteValue("GrzMotion", "RtspRestartAppCount", "0");
                     // if not yet running, start RTSP via app restart
-                    if ( Settings.ImageSource == ImageSourceType.UVC ) {
+                    if ( Settings.ImageSource == ImageSourceType.RTSP ) {
                         if ( _rtspStream == null || (_rtspStream != null && _rtspStream.GetStatus != RtspControl.Status.RUNNING) ) {
                             // set flag, that this is not an app crash
                             ini.IniWriteValue("GrzMotion", "AppCrash", "False");
                             // memorize count of app restarts, needed to avoid restart loops
                             Settings.RtspRestartAppCount++;
                             ini.IniWriteValue("GrzMotion", "RtspRestartAppCount", Settings.RtspRestartAppCount.ToString());
+                            // restart GrzMotion
                             Logger.logTextLnU(DateTime.Now, String.Format("new day RTSP exception GrzMotion start"));
-                            string exeName = System.Diagnostics.Process.GetCurrentProcess().MainModule.FileName;
-                            ProcessStartInfo startInfo = new ProcessStartInfo(exeName);
-                            try {
-                                System.Diagnostics.Process.Start(startInfo);
-                                this.Close();
-                            } catch ( Exception ) {; }
+                            Application.Restart();
+                            Environment.Exit(0);
                             return;
                         }
                     }
@@ -1521,12 +1544,33 @@ namespace GrzMotion
                 _rtspStream.Error -= rtspStream_Error;
                 _rtspStream.NewFrame -= rtspStream_NewFrame;
                 _rtspStream.StopRTSP();
+                bool bruteForceStopNeeded = false;
                 System.Diagnostics.Stopwatch sw = new System.Diagnostics.Stopwatch();
                 sw.Start();
                 do {
                     Application.DoEvents();
                     System.Threading.Thread.Sleep(100);
                 } while ( sw.ElapsedMilliseconds < 500 );
+                // normally CANCELLED is to expect, but EXCEPTION might be possible
+                if ( _rtspStream != null && (_rtspStream.GetStatus == RtspControl.Status.CANCELLED || _rtspStream.GetStatus == RtspControl.Status.EXCEPTION) ) {
+                    Logger.logTextLn(DateTime.Now, "MainForm_FormClosing: RTSP stream is stopped");
+                } else {
+                    bruteForceStopNeeded = true;
+                }
+                // brute force RTSP stream cancellation via aborting its parent thread
+                if ( bruteForceStopNeeded ) {
+                    if ( _rtspStreamThread != null ) {
+                        Logger.logTextLn(DateTime.Now, "MainForm_FormClosing: RTSP stream stopping failed, now aborting the calling thread");
+                        _rtspStreamThread.Abort();
+                        if ( _rtspStreamThread.Join(500) ) {
+                            Logger.logTextLn(DateTime.Now, String.Format("MainForm_FormClosing: _rtspStreamThread successfully aborted"));
+                        } else {
+                            Logger.logTextLn(DateTime.Now, String.Format("MainForm_FormClosing: _rtspStreamThread did not abort, giving up ..."));
+                        }
+                    } else {
+                        Logger.logTextLn(DateTime.Now, String.Format("MainForm_FormClosing: _rtspStreamThread was already finished"));
+                    }
+                }
             }
 
             // stop UVC camera & store meaningful camera parameters
@@ -1567,6 +1611,8 @@ namespace GrzMotion
             // if app live cycle comes here, there was no app crash, write such info to ini for next startup log
             AppSettings.IniFile ini = new AppSettings.IniFile(System.Windows.Forms.Application.ExecutablePath + ".ini");
             ini.IniWriteValue("GrzMotion", "AppCrash", "False");
+            // hard exit
+            Environment.Exit(0);
         }
 
         // RTSP device is listed (if any ) at pos 0 in camera combobox
@@ -1661,7 +1707,7 @@ namespace GrzMotion
             string device = this.devicesCombo.Items[this.devicesCombo.SelectedIndex].ToString();
             if ( device.StartsWith("rtsp", true, CultureInfo.InvariantCulture) ) {
                 // RTSP streaming device
-                if ( (_buttonConnectString == this.connectButton.Text) && (sender != null) ) {
+                if ( _buttonConnectString == this.connectButton.Text ) {
                     // UI controls
                     EnableConnectionControls(false);
                     EnableLiveControls(false);
@@ -1669,7 +1715,18 @@ namespace GrzMotion
                     _rtspStream = new RtspControl();
                     _rtspStream.NewFrame += rtspStream_NewFrame; // raises an event, if a new frame arrived 
                     _rtspStream.Error += rtspStream_Error;       // raises an error, if it happens internally 
-                    _rtspStream.StartRTSP(this.SourceResolution, Settings.RtspConnectUrl);
+                    // a separate thread as a measure of last resort to end a hanging RTSP client
+                    if ( _rtspStreamThread != null ) {
+                        _rtspStreamThread.Abort();
+                    }
+                    // fire & forget: extra thread, in case _rtspStream would not error out
+                    _rtspStreamThread = new Thread(() => {
+                        // runs until RTSP stream is stopped or error
+                        _rtspStream.StartRTSP(this.SourceResolution, Settings.RtspConnectUrl);
+                        Logger.logTextLn(DateTime.Now, "connectButton_Click: _rtspStreamThread init done");
+                    });
+                    _rtspStreamThread.Start();
+                    // init flag 
                     _justConnected = true;
                     // minimize app if set
                     if ( Settings.DetectMotion && Settings.MinimizeApp) {
@@ -1677,20 +1734,45 @@ namespace GrzMotion
                     }
                     Logger.logTextLn(DateTime.Now, "connectButton_Click: RTSP stream started");
                 } else {
+                    Logger.logTextLn(DateTime.Now, "connectButton_Click: RTSP stream is about to stop");
                     // shutdown webserver no matter what
                     ImageWebServer.Stop();
-                    // visibility
-                    EnableConnectionControls(true);
                     // disconnect handlers
                     _rtspStream.Error -= rtspStream_Error;
                     _rtspStream.NewFrame -= rtspStream_NewFrame;
                     // RTSP stop
                     _rtspStream.StopRTSP();
-                    Logger.logTextLn(DateTime.Now, "connectButton_Click: RTSP stream stopped");
+                    // wait a max of 5 seconds for cancellation: if it takes longer, brute force will be needed
+                    System.Diagnostics.Stopwatch sw = new System.Diagnostics.Stopwatch();
+                    sw.Start();
+                    do {
+                        Application.DoEvents();
+                        System.Threading.Thread.Sleep(100);
+                        // normally CANCELLED is to expect, but EXCEPTION might be possible
+                        if ( _rtspStream != null && (_rtspStream.GetStatus == RtspControl.Status.CANCELLED || _rtspStream.GetStatus == RtspControl.Status.EXCEPTION) ) {
+                            Logger.logTextLn(DateTime.Now, "connectButton_Click: RTSP stream is stopped");
+                            EnableConnectionControls(true);
+                            return;
+                        }
+                    } while ( sw.ElapsedMilliseconds < 5000 );
+
+                    // brute force RTSP stream cancellation via aborting its parent thread
+                    if ( _rtspStreamThread != null ) {
+                        Logger.logTextLn(DateTime.Now, "connectButton_Click: RTSP stream stopping failed, now aborting the calling thread");
+                        _rtspStreamThread.Abort();
+                        if ( _rtspStreamThread.Join(500) ) {
+                            Logger.logTextLnU(DateTime.Now, String.Format("connectButton_Click: _rtspStreamThread successfully aborted"));
+                        } else {
+                            Logger.logTextLnU(DateTime.Now, String.Format("connectButton_Click: _rtspStreamThread did not abort, giving up ..."));
+                        }
+                    } else {
+                        Logger.logTextLnU(DateTime.Now, String.Format("connectButton_Click: _rtspStreamThread was already finished"));
+                    }
+                    EnableConnectionControls(true);
                 }
             } else {
                 // UVC camera
-                if ( (_buttonConnectString == this.connectButton.Text) && (sender != null) ) {
+                if ( _buttonConnectString == this.connectButton.Text ) {
                     // only connect if feasible
                     if ( (_uvcDevice == null) || (_uvcDevice.VideoCapabilities == null) || (_uvcDevice.VideoCapabilities.Length == 0) || (this.uvcResolutionsCombo.Items.Count == 0) ) {
                         return;
@@ -2091,51 +2173,69 @@ namespace GrzMotion
             }
         }
 
-        // RTSP internal error
+        // RTSP error after exception, which aborts the loop around "rtspClient.ReceiveAsync"
         void rtspStream_Error() {
             if ( _rtspStream != null && this.connectButton.Text != _buttonConnectString ) {
-                // exception ?
+                // any exception needs GrzMotion to restart
                 if ( _rtspStream.GetStatus == RtspControl.Status.EXCEPTION ) {
                     _rtspDeviceExceptionCounter++;
-                }
-                // RTSP stream was already started and now has an error
-                Logger.logTextLnU(DateTime.Now, String.Format("rtspStream_Error: {0} exc_cnt={1}", _rtspStream.GetStatus.ToString(), _rtspDeviceExceptionCounter));
-                // restart GrzMotion after too many exceptions
-                if ( _rtspDeviceExceptionCounter > 5 ) {
+                    // RTSP stream was previously started and now has an exception
+                    Logger.logTextLnU(DateTime.Now, String.Format("rtspStream_Error: {0} exc_cnt={1}", _rtspStream.GetStatus.ToString(), _rtspDeviceExceptionCounter));
+                    // stop RTSP stream: normally should have ended
+                    if ( _rtspStream != null ) {
+                        _rtspStream.Error -= rtspStream_Error;
+                        _rtspStream.NewFrame -= rtspStream_NewFrame;
+                        _rtspStream.StopRTSP();
+                        bool bruteForceStopNeeded = false;
+                        System.Diagnostics.Stopwatch sw = new System.Diagnostics.Stopwatch();
+                        sw.Start();
+                        do {
+                            Application.DoEvents();
+                            System.Threading.Thread.Sleep(100);
+                        } while ( sw.ElapsedMilliseconds < 500 );
+                        // CANCELLED or EXCEPTION to expect
+                        if ( _rtspStream != null && (_rtspStream.GetStatus == RtspControl.Status.CANCELLED || _rtspStream.GetStatus == RtspControl.Status.EXCEPTION) ) {
+                            Logger.logTextLn(DateTime.Now, "rtspStream_Error: RTSP stream is stopped");
+                        } else {
+                            bruteForceStopNeeded = true;
+                        }
+                        // brute force RTSP stream cancellation via aborting its parent thread
+                        if ( bruteForceStopNeeded ) {
+                            if ( _rtspStreamThread != null ) {
+                                Logger.logTextLn(DateTime.Now, "rtspStream_Error: RTSP stream stopping failed, now aborting the calling thread");
+                                _rtspStreamThread.Abort();
+                                if ( _rtspStreamThread.Join(500) ) {
+                                    Logger.logTextLn(DateTime.Now, String.Format("rtspStream_Error: _rtspStreamThread successfully aborted"));
+                                } else {
+                                    Logger.logTextLn(DateTime.Now, String.Format("rtspStream_Error: _rtspStreamThread did not abort, giving up ..."));
+                                }
+                            } else {
+                                Logger.logTextLn(DateTime.Now, String.Format("rtspStream_Error: _rtspStreamThread was already finished"));
+                            }
+                        }
+                    }
+                    // set flag, that the following restart is not caused by a real app crash
                     if ( Settings.RtspRestartAppCount < 5 ) {
-                        // set flag, that this is not an app crash
                         AppSettings.IniFile ini = new AppSettings.IniFile(System.Windows.Forms.Application.ExecutablePath + ".ini");
                         ini.IniWriteValue("GrzMotion", "AppCrash", "False");
-                        // memorize count of app restarts, needed to avoid restart loops
+                        // memorize count of app restarts, needed to avoid restart loops; flag is reset around midnight, so the game may begin on a new day again 
                         Settings.RtspRestartAppCount++;
                         ini.IniWriteValue("GrzMotion", "RtspRestartAppCount", Settings.RtspRestartAppCount.ToString());
-                        Logger.logTextLnU(DateTime.Now, String.Format("RTSP exception count > 5, now restarting GrzMotion"));
-                        string exeName = System.Diagnostics.Process.GetCurrentProcess().MainModule.FileName;
-                        ProcessStartInfo startInfo = new ProcessStartInfo(exeName);
-                        try {
-                            System.Diagnostics.Process.Start(startInfo);
-                            this.Close();
-                        } catch ( Exception ) {; }
+                        // IMessageFilter
+                        Application.RemoveMessageFilter(this);
+                        // shutdown webserver no matter what
+                        ImageWebServer.Stop();
+                        // stop ping looper task
+                        _runPing = false;
+                        // restart GrzMotion
+                        Logger.logTextLnU(DateTime.Now, String.Format("RTSP exception count {0} < 5, now restarting GrzMotion", _rtspDeviceExceptionCounter));
+                        Application.Restart();
+                        Environment.Exit(0);
                     } else {
-                        Logger.logTextLnU(DateTime.Now, String.Format("RTSP app restart count > 5, NOT restarting GrzMotion"));
+                        Logger.logTextLnU(DateTime.Now, String.Format("RTSP app restart count {0} >= 5, NOT restarting GrzMotion for today anymore", _rtspDeviceExceptionCounter));
                     }
-                    return;
-                }
-                // try to restart RTSP  
-                this.connectButton.PerformClick();
-                // wait until connect button is ready to start again 
-                System.Diagnostics.Stopwatch sw = new System.Diagnostics.Stopwatch();
-                sw.Start();
-                do {
-                    Application.DoEvents();
-                    System.Threading.Thread.Sleep(100);
-                } while ( this.connectButton.Text != _buttonConnectString && sw.ElapsedMilliseconds < 5000 );
-                // restart RTSP stream
-                if ( this.connectButton.Text == _buttonConnectString ) {
-                    Logger.logTextLnU(DateTime.Now, "RTSP trying to restart");
-                    this.connectButton.PerformClick();
                 } else {
-                    Logger.logTextLnU(DateTime.Now, "RTSP restart not possible");
+                    Logger.logTextLnU(DateTime.Now, String.Format("RTSP error, continue w/o further action"));
                 }
             }
         }
@@ -2176,6 +2276,8 @@ namespace GrzMotion
             }
             // sync to motion count from today
             getTodaysMotionsCounters();
+
+            int oomeCnt = 0;
 
             //
             // loop as long as camera is running
@@ -2220,18 +2322,31 @@ namespace GrzMotion
                         }
                     }
                     excStep = 2;
-                    using ( var graphics = Graphics.FromImage(_origFrame) ) {
-                        string text = now.ToString("yyyy.MM.dd HH:mm:ss_fff", System.Globalization.CultureInfo.InvariantCulture);
-                        if ( firstImageProcessing ) {
-                            timestampLength = (int)graphics.MeasureString(text, _timestampFont).Width + 10;
-                            oneCharStampLength = (int)((double)timestampLength / 20.0f);
+                    try {
+                        using ( var graphics = Graphics.FromImage(_origFrame) ) {
+                            string text = now.ToString("yyyy.MM.dd HH:mm:ss_fff", System.Globalization.CultureInfo.InvariantCulture);
+                            if ( firstImageProcessing ) {
+                                timestampLength = (int)graphics.MeasureString(text, _timestampFont).Width + 10;
+                                oneCharStampLength = (int)((double)timestampLength / 20.0f);
+                            }
+                            graphics.FillRectangle(Brushes.Yellow, 0, 0, timestampLength, timestampHeight);
+                            graphics.DrawString(text, _timestampFont, Brushes.Black, 5, 5);
+                            text = _motionsDetected.ToString() + "/" + _consecutivesDetected.ToString();
+                            int xPos = _origFrame.Width - oneCharStampLength * text.Length - 5;
+                            graphics.FillRectangle(Brushes.Yellow, xPos, yFill, _origFrame.Width, _origFrame.Height);
+                            graphics.DrawString(text, _timestampFont, Brushes.Black, xPos, yDraw);
+                            oomeCnt = 0;
                         }
-                        graphics.FillRectangle(Brushes.Yellow, 0, 0, timestampLength, timestampHeight);
-                        graphics.DrawString(text, _timestampFont, Brushes.Black, 5, 5);
-                        text = _motionsDetected.ToString() + "/" + _consecutivesDetected.ToString();
-                        int xPos = _origFrame.Width - oneCharStampLength * text.Length - 5;
-                        graphics.FillRectangle(Brushes.Yellow, xPos, yFill, _origFrame.Width, _origFrame.Height);
-                        graphics.DrawString(text, _timestampFont, Brushes.Black, xPos, yDraw);
+                    } catch ( OutOfMemoryException oome ) {
+                        oomeCnt++;
+                        if ( oomeCnt > 10 ) {
+                            Logger.logTextLnU(now, String.Format("rtspImageGrabber: excStep=2 oomeCnt = {0} giving up", oomeCnt));
+                            break;
+                        } else {
+                            Logger.logTextLnU(now, String.Format("rtspImageGrabber: excStep=2 {0} continue ...", oome.Message));
+                            System.Threading.Thread.Sleep(Math.Max(0, TWO_FPS - (int)_procMs));
+                            continue;
+                        }
                     }
 
                     // motion detector works with a scaled image, typically 800 x 600 or whatever fits to width 800 regarding image's aspect ratio
@@ -2240,7 +2355,19 @@ namespace GrzMotion
                         _currFrame.Dispose();
                     }
                     excStep = 4;
-                    _currFrame = resizeBitmap(_origFrame, Settings.ScaledImageSize);
+                    try {
+                        _currFrame = resizeBitmap(_origFrame, Settings.ScaledImageSize);
+                    } catch ( OutOfMemoryException oome ) {
+                        oomeCnt++;
+                        if ( oomeCnt > 10 ) {
+                            Logger.logTextLnU(now, String.Format("rtspImageGrabber: excStep=4 oomeCnt = {0} giving up", oomeCnt));
+                            break;
+                        } else {
+                            Logger.logTextLnU(now, String.Format("rtspImageGrabber: excStep=4 {0} continue ...", oome.Message));
+                            System.Threading.Thread.Sleep(Math.Max(0, TWO_FPS - (int)_procMs));
+                            continue;
+                        }
+                    }
 
                     // this will become the processed frame
                     excStep = 5;
@@ -3935,6 +4062,10 @@ namespace GrzMotion
         [CategoryAttribute("Data Storage")]
         [ReadOnly(false)]
         public Boolean WriteLogfile { get; set; }
+        [CategoryAttribute("Data Storage")]
+        [Description("Increases logfile size, only useful for debug purposes")]
+        [ReadOnly(false)]
+        public Boolean LogRamUsage { get; set; }
 
         [Description("Show pixel change percentage in live view")]
         [CategoryAttribute("Debugging")]
@@ -4301,6 +4432,10 @@ namespace GrzMotion
             if ( bool.TryParse(ini.IniReadValue(iniSection, "WriteLogfile", "False"), out tmpBool) ) {
                 WriteLogfile = tmpBool;
             }
+            // app writes RAM usage into logfile
+            if ( bool.TryParse(ini.IniReadValue(iniSection, "LogRamUsage", "False"), out tmpBool) ) {
+                LogRamUsage = tmpBool;
+            }
             // hint to edit ROIs
             EditROIs = "Click, then click again the right hand side '...' button to edit ROIs";
             // set all ROIs in PropertyGrid array
@@ -4412,6 +4547,8 @@ namespace GrzMotion
             ini.IniWriteValue(iniSection, "StoragePathAlt", StoragePathAlt.ToString());
             // app writes logfile
             ini.IniWriteValue(iniSection, "WriteLogfile", WriteLogfile.ToString());
+            // app writes RAM usage into logfile
+            ini.IniWriteValue(iniSection, "LogRamUsage", LogRamUsage.ToString());
             // run webserver
             ini.IniWriteValue(iniSection, "RunWebserver", RunWebserver.ToString());
             // webserver image type

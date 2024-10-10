@@ -30,6 +30,7 @@ namespace RtspInfra {
             RUNNING = 0,
             CANCELLED = 1,
             EXCEPTION = 2,
+            WAITCANCEL = 3,
         }
         private Status _status = Status.UNDEFINED;
         public Status GetStatus { 
@@ -67,7 +68,12 @@ namespace RtspInfra {
                         _status = Status.CANCELLED;
                         return;
                     } catch ( RtspClientException e ) {
-                        Logger.logTextLnU(DateTime.Now, "RtspControl exception: " + e.Message);
+                        Logger.logTextLnU(DateTime.Now, "RtspControl exception #1: " + e.InnerException?.Message);
+                        _status = Status.EXCEPTION;
+                        Error?.Invoke();
+                        return;
+                    } catch ( InvalidOperationException e ) {
+                        Logger.logTextLnU(DateTime.Now, "RtspControl exception #2: " + e.Message);
                         _status = Status.EXCEPTION;
                         Error?.Invoke();
                         return;
@@ -78,7 +84,10 @@ namespace RtspInfra {
 
         // stop connection to a RTSP stream
         public void StopRTSP() {
+            _status = Status.WAITCANCEL;
+            Logger.logTextLn(DateTime.Now, "RtspControl is about to cancel");
             _cancellationTokenSource?.Cancel();
+            Logger.logTextLn(DateTime.Now, "RtspControl token cancellation is requested");
         }
 
         // tell a listener about a new frame; inspired by https://www.bytehide.com/blog/how-to-implement-events-in-csharp
@@ -126,17 +135,12 @@ namespace RtspInfra {
                 try {
                     // unlock bitmap's bits
                     _bmp.UnlockBits(bmpData);
-
-//// test output into _bmp
-//using ( var graphics = Graphics.FromImage(_bmp) ) {
-//    string text = rawVideoFrame.Timestamp.ToString("yyyy.MM.dd HH:mm:ss_fff", System.Globalization.CultureInfo.InvariantCulture);
-//    graphics.DrawString(text, new Font("Arial", 20), Brushes.White, 0, 50);
-//}
-
                     // raise event toward a listener 
                     NewFrame?.Invoke(_bmp);
                 } catch ( System.InvalidOperationException ioe ) {
-                    Logger.logTextLn(DateTime.Now, "RtspClient_FrameReceived exception: " + ioe.Message); 
+                    Logger.logTextLn(DateTime.Now, "RtspClient_FrameReceived ioe: " + ioe.Message);
+                } catch ( Exception ex ) {
+                    Logger.logTextLn(DateTime.Now, "RtspClient_FrameReceived exception: " + ex.Message);
                 }
             }
         }
@@ -147,7 +151,7 @@ namespace RtspInfra {
                 return FFmpegVideoCodecId.MJPEG;
             if ( videoFrame is RawH264Frame )
                 return FFmpegVideoCodecId.H264;
-            Logger.logTextLn(DateTime.Now, "DetectCodecId: " + nameof(videoFrame));
+            Logger.logTextLn(DateTime.Now, "DetectCodecId unsupported: " + nameof(videoFrame));
             throw new ArgumentOutOfRangeException(nameof(videoFrame));
         }
 
