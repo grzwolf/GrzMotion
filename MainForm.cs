@@ -3470,7 +3470,6 @@ namespace GrzMotion
 
             // locals
             int index = -1;
-            int uvcDeviceSnap_NewFramePass = 0;
             VideoCaptureDevice uvcDeviceSnap;
 
             try {
@@ -3505,12 +3504,6 @@ namespace GrzMotion
                     // inline event handling
                     uvcDeviceSnap.NewFrame += new AForge.Video.NewFrameEventHandler(delegate (object sender, AForge.Video.NewFrameEventArgs eventArgs) {
                         try {
-                            // let pass first 10 frames due to presumable over exposure
-                            if ( uvcDeviceSnap_NewFramePass++ < 10 ) {
-                                return;
-                            }
-                            // reset pass thru counter
-                            uvcDeviceSnap_NewFramePass = 0;
                             // save UVC snapshot bmp
                             try {
                                 Bitmap bmp = (Bitmap)eventArgs.Frame.Clone();
