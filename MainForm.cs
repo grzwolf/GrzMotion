@@ -814,7 +814,7 @@ namespace GrzMotion
                             ini.IniWriteValue("GrzMotion", "RtspRestartAppCount", Settings.RtspRestartAppCount.ToString());
                             // restart GrzMotion
                             Logger.logTextLnU(DateTime.Now, String.Format("new day RTSP exception GrzMotion start"));
-                            Application.Restart();
+                            System.Diagnostics.Process.Start(Application.ExecutablePath);
                             Environment.Exit(0);
                             return;
                         }
@@ -2229,7 +2229,7 @@ namespace GrzMotion
                         _runPing = false;
                         // restart GrzMotion
                         Logger.logTextLnU(DateTime.Now, String.Format("RTSP exception count {0} < 5, now restarting GrzMotion", _rtspDeviceExceptionCounter));
-                        Application.Restart();
+                        System.Diagnostics.Process.Start(Application.ExecutablePath);
                         Environment.Exit(0);
                     } else {
                         Logger.logTextLnU(DateTime.Now, String.Format("RTSP app restart count {0} >= 5, NOT restarting GrzMotion for today anymore", _rtspDeviceExceptionCounter));
