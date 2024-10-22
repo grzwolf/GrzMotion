@@ -31,6 +31,7 @@ namespace RtspInfra {
             CANCELLED = 1,
             EXCEPTION = 2,
             WAITCANCEL = 3,
+            NORESPOND = 4,
         }
         private Status _status = Status.UNDEFINED;
         public Status GetStatus { 
@@ -70,6 +71,9 @@ namespace RtspInfra {
                     } catch ( RtspClientException e ) {
                         Logger.logTextLnU(DateTime.Now, "RtspControl exception #1: " + e.InnerException?.Message);
                         _status = Status.EXCEPTION;
+                        if ( e.InnerException != null && e.InnerException.Message.Contains("did not properly respond") ) {
+                            _status = Status.NORESPOND;
+                        }
                         Error?.Invoke();
                         return;
                     } catch ( InvalidOperationException e ) {
