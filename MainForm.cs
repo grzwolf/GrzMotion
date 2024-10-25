@@ -61,8 +61,8 @@ namespace GrzMotion
 
         private DateTime _appStartTime = DateTime.Now;                       // app start time is used to reset Settings.RtspRestartAppCount
 
-        private VideoCaptureDevice _uvcDeviceSnap = null;                    // AForge UVC camera device for snapshots, only if in RTSP mode
-        bool _uvcDeviceSnap_NewFrameIsBusy = false;                          // avoid snapshot single shot overrun
+        VideoCaptureDevice _uvcDeviceSnap = null;                            // AForge UVC camera device for snapshots, only if in RTSP mode
+        bool _uvcDeviceSnapIsBusy = false;                                   // avoid snapshot single shot overrun
 
         private string _buttonConnectString;                                 // original text on camera start button
                                                                              
@@ -3490,84 +3490,89 @@ namespace GrzMotion
         // make a single snapshot with the UVC camera
         void MakeSnapshotWithUVC() {
             // return if already busy   
-            if ( _uvcDeviceSnap_NewFrameIsBusy ) {
+            if ( _uvcDeviceSnapIsBusy ) {
                 return;
             }
-
+            // busy flag
+            _uvcDeviceSnapIsBusy = true;
             // locals
-            int index = -1;
-            VideoCaptureDevice uvcDeviceSnap;
-
+            int uvcResolutionIndex = -1;
             try {
-                // busy flag
-                _uvcDeviceSnap_NewFrameIsBusy = true;
                 // create exclusive snapshot device
-                uvcDeviceSnap = new VideoCaptureDevice(Settings.CameraMoniker);
-                if ( uvcDeviceSnap == null ) {
-                    _uvcDeviceSnap_NewFrameIsBusy = false;
+                _uvcDeviceSnap = new VideoCaptureDevice(Settings.CameraMoniker);
+                if ( _uvcDeviceSnap == null ) {
+                    _uvcDeviceSnapIsBusy = false;
                     return;
                 }
                 // get best UVC snapshot resolution
                 int maxW = 0;
                 int maxH = 0;
-                for ( int i = 0; i < uvcDeviceSnap.VideoCapabilities.Length; i++ ) {
-                    if ( uvcDeviceSnap.VideoCapabilities[i].FrameSize.Width >= maxW && uvcDeviceSnap.VideoCapabilities[i].FrameSize.Height >= maxH ) {
-                        maxW = uvcDeviceSnap.VideoCapabilities[i].FrameSize.Width;
-                        maxH = uvcDeviceSnap.VideoCapabilities[i].FrameSize.Height;
-                        index = i;
+                for ( int i = 0; i < _uvcDeviceSnap.VideoCapabilities.Length; i++ ) {
+                    if ( _uvcDeviceSnap.VideoCapabilities[i].FrameSize.Width >= maxW && _uvcDeviceSnap.VideoCapabilities[i].FrameSize.Height >= maxH ) {
+                        maxW = _uvcDeviceSnap.VideoCapabilities[i].FrameSize.Width;
+                        maxH = _uvcDeviceSnap.VideoCapabilities[i].FrameSize.Height;
+                        uvcResolutionIndex = i;
                     }
                 }
             } catch ( Exception e ) {
-                _uvcDeviceSnap_NewFrameIsBusy = false;
+                Logger.logTextLn(DateTime.Now, String.Format("MakeSnapshotWithUVC init exception: {0}", e.Message));
+                _uvcDeviceSnapIsBusy = false;
                 return;
             }
-
-            if ( index != -1 ) {
+            if ( uvcResolutionIndex != -1 ) {
+                int step = 0;
                 try {
                     // init and start UVC snapshot device
-                    uvcDeviceSnap.VideoResolution = uvcDeviceSnap.VideoCapabilities[index];
-                    uvcDeviceSnap.Start();
-                    // inline event handling
-                    uvcDeviceSnap.NewFrame += new AForge.Video.NewFrameEventHandler(delegate (object sender, AForge.Video.NewFrameEventArgs eventArgs) {
-                        try {
-                            // save UVC snapshot bmp
-                            try {
-                                Bitmap bmp = (Bitmap)eventArgs.Frame.Clone();
-                                using ( var graphics = Graphics.FromImage(bmp) ) {
-                                    string text = DateTime.Now.ToString("yyyy.MM.dd HH:mm:ss_fff", System.Globalization.CultureInfo.InvariantCulture);
-                                    graphics.DrawString(text, _timestampFont, Brushes.Black, 5, 5);
-                                }
-                                string path = System.IO.Path.Combine(Settings.StoragePath, _nowStringPath + "_snap");
-                                System.IO.Directory.CreateDirectory(path);
-                                string fileName = System.IO.Path.Combine(path, _nowStringFile + ".jpg");
-                                bmp.Save(fileName, System.Drawing.Imaging.ImageFormat.Jpeg);
-                                bmp.Dispose();
-                            } catch ( Exception e ) {
-                                Logger.logTextLn(DateTime.Now, "uvcDeviceSnap.NewFrame bmp exception: " + e.Message);
-                            }
-                            // stop UVC snapshot device
-                            uvcDeviceSnap.SignalToStop();
-                            System.Diagnostics.Stopwatch sw = new System.Diagnostics.Stopwatch();
-                            sw.Start();
-                            do {
-                                Application.DoEvents();
-                                System.Threading.Thread.Sleep(100);
-                            } while ( sw.ElapsedMilliseconds < 500 );
-                            // reset busy state
-                            _uvcDeviceSnap_NewFrameIsBusy = false;
-                        } catch ( Exception e ) {
-                            Logger.logTextLn(DateTime.Now, "uvcDeviceSnap.NewFrame exception: " + e.Message);
-                        } finally {
-                            _uvcDeviceSnap_NewFrameIsBusy = false;
-                        }
-                    });
+                    _uvcDeviceSnap.VideoResolution = _uvcDeviceSnap.VideoCapabilities[uvcResolutionIndex];
+                    step = 1;
+                    _uvcDeviceSnap.Start();
+                    step = 2;
+                    _uvcDeviceSnap.NewFrame += uvcDeviceSnapHandler;
                 } catch ( Exception e ) {
-                    Logger.logTextLn(DateTime.Now, "MakeSnapshotWithUVC start exception: " + e.Message);
-                    _uvcDeviceSnap_NewFrameIsBusy = false;
+                    Logger.logTextLn(DateTime.Now, String.Format("MakeSnapshotWithUVC start exception {0}: {1}", step, e.Message));
+                    _uvcDeviceSnapIsBusy = false;
+                    _uvcDeviceSnap = null;
                 }
             } else {
-                _uvcDeviceSnap_NewFrameIsBusy = false;
-                uvcDeviceSnap = null;
+                _uvcDeviceSnapIsBusy = false;
+                _uvcDeviceSnap = null;
+            }
+        }
+        void uvcDeviceSnapHandler(object sender, AForge.Video.NewFrameEventArgs eventArgs) {
+            try {
+                // save UVC snapshot bmp
+                try {
+                    Bitmap bmp = (Bitmap)eventArgs.Frame.Clone();
+                    using ( var graphics = Graphics.FromImage(bmp) ) {
+                        string text = DateTime.Now.ToString("yyyy.MM.dd HH:mm:ss_fff", System.Globalization.CultureInfo.InvariantCulture);
+                        graphics.DrawString(text, _timestampFont, Brushes.Black, 5, 5);
+                    }
+                    string path = System.IO.Path.Combine(Settings.StoragePath, _nowStringPath + "_snap");
+                    System.IO.Directory.CreateDirectory(path);
+                    string fileName = System.IO.Path.Combine(path, _nowStringFile + ".jpg");
+                    bmp.Save(fileName, System.Drawing.Imaging.ImageFormat.Jpeg);
+                    bmp.Dispose();
+                } catch ( Exception e ) {
+                    Logger.logTextLn(DateTime.Now, "uvcDeviceSnapHandler bmp exception: " + e.Message);
+                    _uvcDeviceSnapIsBusy = false;
+                    _uvcDeviceSnap = null;
+                    return;
+                }
+                // unregister event handler
+                _uvcDeviceSnap.NewFrame -= uvcDeviceSnapHandler;
+                // stop UVC snapshot device
+                _uvcDeviceSnap.SignalToStop();
+                System.Diagnostics.Stopwatch sw = new System.Diagnostics.Stopwatch();
+                sw.Start();
+                do {
+                    Application.DoEvents();
+                    System.Threading.Thread.Sleep(100);
+                } while ( sw.ElapsedMilliseconds < 500 );
+            } catch ( Exception e ) {
+                Logger.logTextLn(DateTime.Now, "uvcDeviceSnapHandler exception: " + e.Message);
+            } finally {
+                _uvcDeviceSnapIsBusy = false;
+                _uvcDeviceSnap = null;
             }
         }
 
