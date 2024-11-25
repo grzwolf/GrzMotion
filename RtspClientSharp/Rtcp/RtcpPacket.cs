@@ -49,15 +49,7 @@ namespace RtspClientSharp.Rtcp
 
                 int payloadLength = dwordLength * 4;
 
-                // original handling
-                //if (payloadLength > totalLength - 4)
-                //    throw new ArgumentException(
-                //        "Invalid RTCP packet size. It seems that data segment contains bad data", nameof(byteSegment));
-                // untested
-                //if ( payloadLength > totalLength - 4 ) {
-                //    payloadLength = totalLength - 4;
-                //}
-                // no idea, if this works
+                // to abandon too few data, circumvents the otherwise thrown exception
                 if ( payloadLength > totalLength - 4 ) {
                     Logger.logTextLnU(DateTime.Now, "RTCP payloadLength > totalLength - 4 --> yield break");
                     yield break;
