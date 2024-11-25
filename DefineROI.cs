@@ -33,6 +33,19 @@ namespace GrzMotion {
 
         // form close methods
         private void buttonOk_Click(object sender, EventArgs e) {
+            // latest change might not yet be applied
+            if ( dirtyFlag ) {
+                DialogResult res = MessageBox.Show("There is at least one unsaved change to the settings.\n\nDiscard this change?", "Note", MessageBoxButtons.YesNo);
+                if ( res == DialogResult.Yes ) {
+                    this.DialogResult = DialogResult.Cancel;
+                    this.Close();
+                } else {
+                    if ( res == DialogResult.No ) {
+                        return;
+                    }
+                }
+            }
+            // standard flow
             this.DialogResult = DialogResult.OK;
             this.Close();
         }
