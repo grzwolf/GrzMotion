@@ -3485,6 +3485,11 @@
               resource lookups using this strongly typed resource class.
             </summary>
         </member>
+        <member name="P:AForge.Video.DirectShow.Properties.Resources.camera">
+            <summary>
+              Looks up a localized resource of type System.Drawing.Bitmap.
+            </summary>
+        </member>
         <member name="T:AForge.Video.DirectShow.FilterCategory">
             <summary>
             DirectShow filter categories.
